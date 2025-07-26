@@ -25,17 +25,16 @@ TBD
 │   ├── dat_ml_6m_imputed.csv
 │   ├── dat_ml_1y_imputed.csv
 │   ├── dat_ml_7y_imputed.csv
-├── r_analysis/
-│   └── outcome_cleaning.Rmd
 ├── notebooks/
-│   └── modeling_pipeline.ipynb
+│   ├── data_cleaning.Rmd
+│   └── modeling.ipynb
 └── README.md
 
 data/: Contains raw and processed datasets.
 
 r_analysis/: R Markdown file for cleaning and deriving outcomes using the original study data.
 
-notebooks/: upyter notebook for preprocessing, imputation, modeling, and evaluation.
+notebooks/: R Markdown file for cleaning and deriving outcomes using the original study data; Jupyter notebook for preprocessing, imputation, modeling, and evaluation.
 
 results/: Summarized model evaluation metrics and calibration results.
 
