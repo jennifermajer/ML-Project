@@ -19,14 +19,17 @@ Utilize SHAP feature importance analysis to identify influential predictors and 
 Create hypothetical patient "phenotype profiles" to enhance clinical utility. 
 
 **Repository Structure**
+
 data/
 - THP_clean.dta (original study data)
 - dat_ml_6m_imputed.csv
 - dat_ml_1y_imputed.csv
 - dat_ml_7y_imputed.csv
+
 scripts/
 - data_cleaning.Rmd
 - modeling.ipynb
+
 README.md
 
 data/: Contains raw and processed datasets.
