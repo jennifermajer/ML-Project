@@ -1,6 +1,6 @@
 **Predicting Depression Trajectories Following Cognitive Behavioral Therapy Using Machine Learning**
 
-This repository contains code and documentation for a machine learning project aimed at predicting depression trajectories (remission, relapse, and recurrence) following initiation of Cognitive Behavioral Therapy (CBT)-based treatment for perinatal depression, using data derived from the "Thinking Healthy" cluster randomized trial (CRT).
+This repository contains code and documentation for a machine learning project aimed at predicting depression trajectories (remission, relapse, and recurrence) following initiation of Cognitive Behavioral Therapy (CBT)-based treatment for perinatal depression, using data derived from a cluster randomized trial (CRT) conducted in Pakistan.
 
 **Background**
 
@@ -19,24 +19,20 @@ Utilize SHAP feature importance analysis to identify influential predictors and 
 Create hypothetical patient "phenotype profiles" to enhance clinical utility. 
 
 **Repository Structure**
-TBD
-├── data/
-│   ├── raw_data.csv
-│   ├── dat_ml_6m_imputed.csv
-│   ├── dat_ml_1y_imputed.csv
-│   ├── dat_ml_7y_imputed.csv
-├── notebooks/
-│   ├── data_cleaning.Rmd
-│   └── modeling.ipynb
-└── README.md
+data/
+- THP_clean.dta (original study data)
+- dat_ml_6m_imputed.csv
+- dat_ml_1y_imputed.csv
+- dat_ml_7y_imputed.csv
+scripts/
+- data_cleaning.Rmd
+- modeling.ipynb
+README.md
 
 data/: Contains raw and processed datasets.
 
-r_analysis/: R Markdown file for cleaning and deriving outcomes using the original study data.
+scripts/: R Markdown file for cleaning and deriving outcomes using the original study data; Jupyter notebook for preprocessing, imputation, modeling, and evaluation.
 
-notebooks/: R Markdown file for cleaning and deriving outcomes using the original study data; Jupyter notebook for preprocessing, imputation, modeling, and evaluation.
-
-results/: Summarized model evaluation metrics and calibration results.
 
 **Usage**
 TBD
