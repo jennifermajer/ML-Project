@@ -1,0 +1,1160 @@
+---
+title: "Predicting Depression Outcomes Using ML"
+date: "`r Sys.Date()`"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+# ─────────────────────────────────────────────
+# Section 1: Import and Initial Setup
+# ─────────────────────────────────────────────
+
+## Install packages
+```{r}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  dplyr, tidyr, ggplot2, haven, labelled, readr, here,
+  gtsummary, sjPlot, jtools, lubridate, visdat, dataMaid, 
+  viridis, kableExtra, flextable, officer, purrr
+)
+
+```
+
+## Import data (original repository: xxxxxx)
+```{r}
+
+dat <- read_dta(here("data", "THP_clean.dta"))
+```
+
+# ─────────────────────────────────────────────
+# Section 2: Data preprocessing
+# ─────────────────────────────────────────────
+
+### Categorize study samples
+```{r}
+
+# View initial breakdown
+table(dat$treat, dat$dep_sample)
+
+# Define study group classification
+dat <- dat %>%
+  mutate(
+    study_group = case_when(
+      dep_sample == 0 ~ "7-year control",
+      (dep_sample == 1 | is.na(dep_sample)) & treat == 1 ~ "Treatment group",
+      (dep_sample == 1 | is.na(dep_sample)) & treat == 0 ~ "Baseline control",
+      TRUE ~ NA_character_
+    )
+  )
+
+# Review classification
+table(dat$study_group, useNA = "ifany")
+```
+
+### Define analysis subsets
+```{r}
+
+# Trial participants at baseline (N = 903)
+dat_trial_baseline <- dat %>%
+  filter(attrit2 %in% c(0, 1))
+
+# At 1-year follow-up (N = 704)
+dat_trial_1y <- dat %>%
+  filter(attrit %in% c(0, 1))
+
+# At 7-year follow-up (N = 585)
+dat_trial_7y <- dat %>%
+  filter(attrit2 == 0 & attrit == 0)
+
+# 7-year follow-up full sample: trial + control (N = 885)
+dat_7y <- dat %>%
+  filter(attrit2 == 0 | dep_sample == 0)
+
+# Control group only (N = 300)
+dat_control <- dat %>%
+  filter(dep_sample == 0)
+
+table(dat_trial_baseline$study_group)
+table(dat_trial_1y$study_group)
+table(dat_trial_7y$study_group)
+table(dat$study_group)
+```
+
+
+### Define outcomes - cut-off 6 for HAM-D (sensitivity analysis)
+```{r, eval= FALSE}
+
+# Percent change and outcomes based on HAM-D ≤ 6 definition
+dat_trial <- dat_trial_baseline %>%
+  mutate(
+    hamd_6m_percentchange = (hamd_6m - hamd_baseline) / hamd_baseline,
+    hamd_1y_percentchange = (hamd_1y - hamd_baseline) / hamd_baseline,
+    hamd_1y_percentchange_prev = (hamd_1y - hamd_6m) / hamd_6m
+  ) %>%
+  mutate(across(
+    c(hamd_6m_percentchange, hamd_1y_percentchange, hamd_1y_percentchange_prev),
+    ~ case_when(
+      is.infinite(.) ~ NA_real_,
+      near(., 1) ~ 0.999,
+      near(., -1) ~ -0.999,
+      TRUE ~ .
+    )
+  )) %>%
+  mutate(
+    response_6mo = as.integer(hamd_6m_percentchange <= -0.50),
+    response_1y = as.integer(hamd_1y_percentchange <= -0.50),
+    response_7y = as.integer(depressed == 0),
+    
+    remission_6mo = as.integer(depressed_6m == 0 & hamd_6m <= 6),
+    remission_1y = as.integer(depressed_1y == 0 & hamd_1y <= 6),
+    remission_7y = as.integer(depressed == 0),
+
+    recovery_1y = as.integer(depressed_6m == 0 & depressed_1y == 0),
+    recovery_7y = as.integer(depressed == 0),
+
+    relapse_1y = as.numeric(case_when(
+      remission_6mo == 1 & (depressed_1y == 1 | hamd_1y_percentchange_prev >= 0.5 | hamd_1y > 6) ~ 1L,
+      remission_6mo == 1 ~ 0L,
+      TRUE ~ NA_integer_
+    )),
+    
+    relapse_7y = as.numeric(case_when(
+      remission_1y == 1 & depressed == 1 ~ 1L,
+      remission_1y == 1 ~ 0L,
+      TRUE ~ NA_integer_
+    )),
+
+    recurrence_7y = as.numeric(case_when(
+      recovery_1y == 1 & depressed == 1 ~ 1L,
+      recovery_1y == 1 ~ 0L,
+      TRUE ~ NA_integer_
+    ))
+  )
+```
+
+### Outcomes - cut-off 7 for HAM-D
+```{r}
+
+# Adjustment to handle zeros and cutoff 7
+dat_trial <- dat_trial_baseline %>%
+  mutate(across(
+    c(hamd_baseline, hamd_6m, hamd_1y),
+    ~ ifelse(. == 0, 0.001, .),
+    .names = "{.col}2"
+  )) %>%
+  mutate(
+    hamd_6m_percentchange = (hamd_6m2 - hamd_baseline2) / hamd_baseline2,
+    hamd_1y_percentchange = (hamd_1y2 - hamd_baseline2) / hamd_baseline2,
+    hamd_1y_percentchange_prev = (hamd_1y2 - hamd_6m2) / hamd_6m2
+  ) %>%
+  mutate(across(
+    c(hamd_6m_percentchange, hamd_1y_percentchange, hamd_1y_percentchange_prev),
+    ~ case_when(
+      is.infinite(.) ~ NA_real_,
+      near(., 1) ~ 0.999,
+      near(., -1) ~ -0.999,
+      near(., 0) ~ 0.001,
+      TRUE ~ .
+    )
+  )) %>%
+  mutate(
+    response_6mo = as.integer(hamd_6m_percentchange <= -0.50),
+    response_1y = as.integer(hamd_1y_percentchange <= -0.50),
+    response_7y = as.integer(depressed == 0),
+
+    remission_6mo = as.integer(depressed_6m == 0 & hamd_6m2 <= 7),
+    remission_1y = as.integer(depressed_1y == 0 & hamd_1y2 <= 7),
+    remission_7y = as.integer(depressed == 0),
+
+    recovery_1y = as.integer(depressed_6m == 0 & depressed_1y == 0),
+    recovery_7y = as.integer(depressed == 0),
+
+    relapse_1y = as.numeric(case_when(
+      remission_6mo == 1 & (depressed_1y == 1 | hamd_1y_percentchange_prev >= 0.5 | hamd_1y2 > 7) ~ 1L,
+      remission_6mo == 1 ~ 0L,
+      TRUE ~ NA_integer_
+    )),
+
+    relapse_7y = as.numeric(case_when(
+      remission_1y == 1 & depressed == 1 ~ 1L,
+      remission_1y == 1 ~ 0L,
+      TRUE ~ NA_integer_
+    )),
+
+    recurrence_7y = as.numeric(case_when(
+      recovery_1y == 1 & depressed == 1 ~ 1L,
+      recovery_1y == 1 ~ 0L,
+      TRUE ~ NA_integer_
+    ))
+  )
+
+```
+
+
+### Rename and label variables
+```{r}
+variable.names(dat_trial)
+
+########### Set var names
+new_names <- c(
+  "age_7y" = "age",
+  "age_baseline" = "age_baseline",
+  "mo_ht_baseline" = "mo_ht",
+  "mo_wt_6m" = "mo_wt_6m",
+  "mo_bmi_baseline" = "mo_bmi",
+  "hamd_baseline" = "hamd_baseline",
+  "hamd_baseline2" = "hamd_baseline2",
+  "hamd_6m" = "hamd_6m",
+  "hamd_6m2" = "hamd_6m2",
+  "hamd_1y" = "hamd_1y",
+  "hamd_1y2" = "hamd_1y2",
+  "depressed_7y" = "depressed",
+  "hamd_6m_percentchange_6m" = "hamd_6m_percentchange",
+  "hamd_1y_percentchange_1y" = "hamd_1y_percentchange",
+  "hamd_1y_percentchange_prev_1y" = "hamd_1y_percentchange_prev",
+  "gaf_6m" = "gaf_6m_2",
+  "gaf_1y" = "gaf_1y_2",
+  "gad_7y" = "gad",
+  "location_delivery_7y" = "var619",
+  "birth_spacing_7y" = "var621",
+  "genhealth_7y" = "genhealth",
+  "notunwell_7y" = "notunwell",
+  "days_healthy_7y" = "days_healthy",
+  "no_hospitalization_7y" = "mo_491_2",
+  "no_severe_illness_7y" = "mo_490_2",
+  "no_eyesight_problems_7y" = "mo_485_2",
+  "no_hearing_problems_7y" = "mo_488_2",
+  "ses_baseline" = "ses_bl_flipped",
+  "income_hh_7y" = "income_hh",
+  "ln_income_fa_7y" = "ln_income_fa",
+  "ses_7y" = "ses",
+  "edu_mo_7y" = "edu_mo",
+  "edu_fa_7y" = "edu_fa",
+  "electricity_baseline" = "electricity",
+  "radio_baseline" = "radio",
+  "tv_baseline" = "tv",
+  "fridge_baseline" = "fridge",
+  "bicycle_baseline" = "bicycle",
+  "motorcycle_baseline" = "motorcycle",
+  "aircon_baseline" = "aircon",
+  "waterpump_baseline" = "waterpump",
+  "cartruck_baseline" = "cartruck",
+  "pipedwater_baseline" = "pipedwater",
+  "wellwithpump_baseline" = "wellwithpump",
+  "wellwater_baseline" = "wellwater",
+  "flushtoilet_baseline" = "flushtoilet",
+  "anylatrine_baseline" = "anylatrine",
+  "brickwalls_baseline" = "brickwalls",
+  "enoughfoodmoney_baseline" = "enoughfoodmoney",
+  "metalroof_baseline" = "metalroof",
+  "bestroof_baseline" = "bestroof",
+  "basicneeds_baseline" = "basicneeds",
+  "enoughfood_baseline" = "enoughfood",
+  "employed_mo_7y" = "employed_mo",
+  "empowered_7y" = "empowered",
+  "motherfinancial_baseline" = "motherfinancial",
+  "motherfinancial_f_7y" = "motherfinancial_f",
+  "income_mo_7y" = "income_mo",
+  "mspss_tot_7y" = "mspss_tot",
+  "grandmother_7y" = "grandmother",
+  "maritalscale_7y" = "maritalscale",
+  "relationshipindex_7y" = "relationshipindex",
+  "nonviolent_7y" = "nonviolent",
+  "relationship_husb_7y" = "relationship_husb",
+  "relationship_inlaw_7y" = "relationship_inlaw",
+  "c_first_child_baseline" = "c_first_child",
+  "girl_baseline" = "girl",
+  "femshare_baseline" = "femshare",
+  "not_stunted_7y" = "not_stunted",
+  "c_ht_7y" = "c_ht",
+  "c_wt_7y" = "c_wt",
+  "WAZ_1y" = "WAZ_12",
+  "HAZ_1y" = "HAZ_12",
+  "infantdev_7y" = "infantdev",
+  "complete_immunization_7y" = "var599",
+  "vci_7y" = "vci",
+  "vsi_7y" = "vsi",
+  "fri_7y" = "fri",
+  "wmi_7y" = "wmi",
+  "psi_7y" = "psi",
+  "fsiq_7y" = "fsiq",
+  "sdq_sum_7y" = "sdq_sum",
+  "urdu_7y" = "urdu",
+  "math_7y" = "math",
+  "private_sch_7y" = "private_sch",
+  "expect_sch_7y" = "expect_sch",
+  "class_size_7y" = "class_size",
+  "classroom_7y" = "classroom",
+  "home_7y" = "home",
+  "stroop_7y" = "stroop",
+  "spence_7y" = "spence",
+  "motor_7y" = "motor",
+  "PPI_7y" = "PPI",
+  "home_obs_7y" = "home_obs",
+  "play_mo_1y" = "play_mo_1y", 
+  "play_fa_1y" = "play_fa_1y"
+)
+
+dat_trial_clean <- dat_trial %>%
+  dplyr::rename(!!!new_names)
+
+######### Set formats
+variable_types <- list(
+  ## Factors
+  factor = c(
+    "treat",
+    "newid",
+    "uc",
+    "interviewer",
+    "month_int"
+    ),
+
+  ## Numeric
+  numeric = c("response_6mo", "response_1y", 
+     "remission_6mo",
+    "remission_1y", 
+    "recovery_1y",
+    "recovery_7y",
+    "recover_never",
+    "relapse_1y",
+    "recurrence_7y",
+    "hamd_6m_percentchange_6m", 
+    "hamd_1y_percentchange_1y", 
+    "hamd_1y_percentchange_prev_1y", 
+    "depressed_6m", 
+    "depressed_1y",
+    "depressed_7y",
+    "depindex_0", 
+    "depindex_0_f", 
+    "depindex_6m", 
+    "depindex_1y", 
+    "depindex_6m_f",
+    "depindex_1y_f", 
+    "age_baseline",
+    "mo_wt_6m",
+    "mo_ht_baseline", 
+    "mo_bmi_baseline", 
+    "hamd_baseline", 
+    "hamd_baseline2",
+    "hamd_6m", 
+    "hamd_6m2",
+    "hamd_1y", 
+    "hamd_1y2", 
+    "bdq_baseline", 
+    "bdq_6m", 
+    "bdq_1y", 
+    "gaf_baseline", 
+    "gaf_6m", 
+    "gaf_1y",  
+    "ses_baseline", 
+    "ses_6m", 
+    "ses_1y", 
+    "employed_fa_baseline", 
+    "occupation_fa_baseline", 
+    "electricity_baseline", 
+    "radio_baseline", 
+    "tv_baseline", 
+    "fridge_baseline", 
+    "bicycle_baseline", 
+    "motorcycle_baseline", 
+    "aircon_baseline", 
+    "waterpump_baseline", 
+    "cartruck_baseline", 
+    "pipedwater_baseline", 
+    "wellwithpump_baseline", 
+    "wellwater_baseline", 
+    "flushtoilet_baseline", 
+    "anylatrine_baseline", 
+    "brickwalls_baseline", 
+    "enoughfoodmoney_baseline", 
+    "metalroof_baseline",
+    "basicneeds_baseline", 
+    "enoughfood_baseline",  
+    "employed_mo_baseline",
+    "grandmother_baseline", 
+    "grandmother_6m", 
+    "grandmother_1y",  
+    "famstruct_baseline",
+    "nonviolent_1y", 
+    "c_first_child_baseline", 
+    "girl_baseline",
+    "exclusivebf_6m", 
+    "anybf_6m",
+    "edu_mo_baseline", 
+    "edu_fa_baseline",
+    "wealth_baseline", 
+    "ln_income_fa_6m", 
+    "ln_income_fa_1y",
+    "motherfinancial_baseline",
+    "empowered_6m", 
+    "mspss_baseline", 
+    "mspss_6m", 
+    "mspss_1y", 
+    "maritalscale_1y",
+    "relationship_husb_1y",  
+    "relationship_inlaw_1y", 
+    "no_kids_baseline",
+    "femshare_baseline",
+    "WAZ_6", 
+    "WAZ_1y", 
+    "HAZ_6", 
+    "HAZ_1y", 
+    "play_mo_1y", 
+    "play_fa_1y")
+)
+
+
+# Convert variables to their appropriate data types and add labels
+dat_trial_clean <- dat_trial_clean %>%
+  mutate(
+    # Convert to factors
+    across(.cols = all_of(variable_types$factor), as.factor),
+    # Convert to numeric
+    across(.cols = all_of(variable_types$numeric), as.numeric))
+
+######### Label variables
+
+# Assign labels to variables
+library(labelled)
+dat_trial_clean <- dat_trial_clean %>%
+  set_variable_labels(
+    response_6mo = "Response at 6 months",
+    response_1y = "Response at 1 year",
+    remission_6mo = "Remission at 6 months",
+    remission_1y = "Remission at 1 year",
+    recovery_1y = "Recovery at 1 year",
+    recovery_7y = "Recovery at 7 years",
+    recover_never = "Never recovered",
+    relapse_1y = "Relapse at 1 year",
+    recurrence_7y = "Recurrence at 7 years",
+    treat = "Treatment group", 
+    newid = "ID", 
+    uc = "Union Council (cluster)", 
+    interviewer = "Interviewer", 
+    month_int = "Month interviewed", 
+    hamd_6m_percentchange_6m = "Percentage change in HAM-D score from baseline at 6 months", 
+    hamd_1y_percentchange_1y = "Percentage change in HAM-D score from baseline at 1 year", 
+    hamd_1y_percentchange_prev_1y = "Percentage change from 6 months in HAM-D score at 1 year", 
+    depindex_0 = "Depression index at baseline", 
+    depindex_0_f = "Depression index at baseline (flipped)", 
+    depindex_6m = "Depression index at 6 months", 
+    depindex_1y = "Depression index at 1 year", 
+    depindex_6m_f = "Depression index at 6 months (flipped)", 
+    depressed_6m = "Depressed at 6 months", 
+    depressed_1y = "Depressed at 1 year", 
+    depressed_7y = "Depressed at 7 years",
+    depindex_1y_f = "Depressed at 1 year (flipped)", 
+    age_baseline = "Mother's age at baseline",
+    mo_wt_6m = "Mother's weight at 6 months",
+    mo_ht_baseline = "Mother's height at baseline", 
+    mo_bmi_baseline = "Mother's BMI at baseline", 
+    hamd_baseline = "HAM-D score at baseline", 
+    hamd_baseline2 = "HAM-D score at baseline - recoded 0's", 
+    hamd_6m = "HAM-D score at 6 months", 
+    hamd_6m2 = "HAM-D score at 6 months - recoded 0's", 
+    hamd_1y = "HAM-D score at 1 year", 
+    hamd_1y2 = "HAM-D score at 1 year - recoded 0's", 
+    bdq_baseline = "BDQ at baseline", 
+    bdq_6m = "BDQ at 6 months", 
+    bdq_1y = "BDQ at 1 year", 
+    gaf_baseline = "GAF at baseline", 
+    gaf_6m = "GAF at 6 months", 
+    gaf_1y = "GAF at 1 year",  
+    ses_baseline = "SES at baseline", 
+    ses_6m = "SES at 6 months", 
+    ses_1y = "SES at 1 year", 
+    edu_mo_baseline = "Mother's education at baseline", 
+    edu_fa_baseline = "Father's educatino at baseline", 
+    employed_fa_baseline = "Father employed at baseline", 
+    occupation_fa_baseline = "Father not manual worker at baseline", 
+    electricity_baseline = "Household has electricity (baseline)", 
+    radio_baseline = "Household has radio (baseline)", 
+    tv_baseline = "Household has television (baseline)", 
+    fridge_baseline = "Household has fridge (baseline)", 
+    bicycle_baseline = "Household has bicycle (baseline)", 
+    motorcycle_baseline = "Household has motorcycle (baseline)", 
+    aircon_baseline = "Household has airconditioner (baseline)", 
+    waterpump_baseline = "Household has water pump (baseline)", 
+    cartruck_baseline = "Household has car or truck (baseline)", 
+    pipedwater_baseline = "Household has piped water (baseline)", 
+    wellwithpump_baseline = "Household has well with pump (baseline)", 
+    wellwater_baseline = "Household has well water (baseline)", 
+    flushtoilet_baseline = "Household has flush toilet (baseline)", 
+    anylatrine_baseline = "Household has any latrine (baseline)", 
+    brickwalls_baseline = "Household has brick walls (baseline)", 
+    enoughfoodmoney_baseline = "Household has enough food and money (baseline)", 
+    metalroof_baseline = "Household has metal roof (baseline)", 
+    wealth_baseline = "Household wealth index (baseline)", 
+    ln_income_fa_6m = "Father's monthly income (ln) at 6 months", 
+    ln_income_fa_1y = "Father's monthly income (ln) at 1 year", 
+    basicneeds_baseline = "Have enough for basic needs (baseline)", 
+    enoughfood_baseline = "Have enough for food (baseline)",  
+    employed_mo_baseline = "Mother usually works (baseline)",
+    motherfinancial_baseline = "Mother controls spending (baseline)",
+    empowered_6m = "Mother's financial empowerment (6 months)", 
+    mspss_baseline = "Perceived social support score (baseline)", 
+    mspss_6m = "Perceived social support score (6 months)", 
+    mspss_1y = "Perceived social support score (1 year)",  
+    grandmother_baseline = "Grandmother present at baseline", 
+    grandmother_6m = "Grandmother present at 6 months", 
+    grandmother_1y = "Grandmother present at 1 year",  
+    famstruct_baseline = "Nuclear family structure (baseline)", 
+    maritalscale_1y = "Marital quality scale at 1 year", 
+    nonviolent_1y = "Husband non-violent at 1 year",  
+    relationship_husb_1y = "Relationship with husband at 1 year",  
+    relationship_inlaw_1y = "Relationship with mother in-law at 1 year", 
+    no_kids_baseline = "Number of children at baseline", 
+    c_first_child_baseline = "Index child is the first one", 
+    girl_baseline = "Index child is female", 
+    femshare_baseline = "Proportion of children ", 
+    exclusivebf_6m = "Exclusive breastfeeding at 6 months", 
+    anybf_6m = "Any breastfeeding at 6 months", 
+    not_stunted_7y = "Not stunted at 7 years", 
+    WAZ_6 = "Weight-for-age z-score at 6 months", 
+    WAZ_1y = "Weight-for-age z-score at 1 year", 
+    HAZ_6 = "Height-for-age z-score at 6 months", 
+    HAZ_1y = "Height-for-age z-score at 1 year", 
+    play_mo_1y = "Mother play frequency with infant at 1 year", 
+    play_fa_1y = "Father play frequency with infant at 1 year"
+  )
+
+
+
+dat_trial_clean <- dat_trial_clean %>%
+  select(c("response_6mo", 
+     "response_1y", 
+     "remission_6mo",
+    "remission_1y", 
+    "recovery_1y",
+    "recovery_7y",
+    "recover_never",
+    "relapse_1y",
+    "recurrence_7y",
+    "treat",
+    "attrit",
+    "attrit2",
+    "newid",
+    "uc",
+    "interviewer",
+    "month_int",
+    "depressed_6m", 
+    "depressed_1y",
+    "depressed_7y",
+    "employed_fa_baseline", 
+    "occupation_fa_baseline", 
+    "electricity_baseline", 
+    "radio_baseline", 
+    "tv_baseline", 
+    "fridge_baseline", 
+    "bicycle_baseline", 
+    "motorcycle_baseline", 
+    "aircon_baseline", 
+    "waterpump_baseline", 
+    "cartruck_baseline", 
+    "pipedwater_baseline", 
+    "wellwithpump_baseline", 
+    "wellwater_baseline", 
+    "flushtoilet_baseline", 
+    "anylatrine_baseline", 
+    "brickwalls_baseline", 
+    "enoughfoodmoney_baseline", 
+    "metalroof_baseline",
+    "basicneeds_baseline", 
+    "enoughfood_baseline",  
+    "employed_mo_baseline",
+    "grandmother_baseline", 
+    "grandmother_6m", 
+    "grandmother_1y",  
+    "famstruct_baseline",
+    "nonviolent_1y", 
+    "c_first_child_baseline", 
+    "girl_baseline",
+    "exclusivebf_6m", 
+    "anybf_6m",
+    "hamd_6m_percentchange_6m", 
+    "hamd_1y_percentchange_1y", 
+    "hamd_1y_percentchange_prev_1y", 
+    "depindex_0", 
+    "depindex_0_f", 
+    "depindex_6m", 
+    "depindex_1y", 
+    "depindex_6m_f",
+    "depindex_1y_f", 
+    "age_baseline",
+    "mo_wt_6m",
+    "mo_ht_baseline", 
+    "mo_bmi_baseline", 
+    "hamd_baseline", 
+    "hamd_baseline2",
+    "hamd_6m", 
+    "hamd_6m2",
+    "hamd_1y", 
+    "hamd_1y2",
+    "bdq_baseline", 
+    "bdq_6m", 
+    "bdq_1y", 
+    "gaf_baseline", 
+    "gaf_6m", 
+    "gaf_1y",  
+    "ses_baseline", 
+    "ses_6m", 
+    "ses_1y", 
+    "edu_mo_baseline", 
+    "edu_fa_baseline",
+    "wealth_baseline", 
+    "ln_income_fa_6m", 
+    "ln_income_fa_1y",
+    "motherfinancial_baseline",
+    "empowered_6m", 
+    "mspss_baseline", 
+    "mspss_6m", 
+    "mspss_1y", 
+    "maritalscale_1y",
+    "relationship_husb_1y",  
+    "relationship_inlaw_1y", 
+    "no_kids_baseline",
+    "femshare_baseline",
+    "WAZ_6", 
+    "WAZ_1y", 
+    "HAZ_6", 
+    "HAZ_1y", 
+    "play_mo_1y", 
+    "play_fa_1y"))
+
+```
+
+
+## Table 1 
+```{r}
+
+# Define variables to include for each timepoint
+include_vars_6m <- c("treat", "hamd_baseline", "hamd_baseline2", "hamd_6m", "hamd_6m2", "hamd_6m_percentchange_6m", "bdq_baseline", "bdq_6m", "gaf_baseline", "gaf_6m", "mo_ht_baseline", "mo_bmi_baseline", "ses_baseline", "ses_6m",
+                     "age_baseline", "edu_mo_baseline", "edu_fa_baseline", 
+                     "employed_fa_baseline", "occupation_fa_baseline", "electricity_baseline", 
+                     "radio_baseline", "tv_baseline", "fridge_baseline", "bicycle_baseline", 
+                     "motorcycle_baseline", "aircon_baseline", "waterpump_baseline", 
+                     "cartruck_baseline", "pipedwater_baseline", "wellwithpump_baseline", 
+                     "wellwater_baseline", "flushtoilet_baseline", "anylatrine_baseline", 
+                     "brickwalls_baseline", "enoughfoodmoney_baseline", "metalroof_baseline", 
+                     "wealth_baseline", "ln_income_fa_6m", "basicneeds_baseline", 
+                     "enoughfood_baseline", "employed_mo_baseline", "empowered_6m", 
+                     "motherfinancial_baseline", "mspss_baseline", "mspss_6m", 
+                     "grandmother_baseline", "grandmother_6m", "famstruct_baseline", "no_kids_baseline", 
+                     "c_first_child_baseline", "girl_baseline", "femshare_baseline", "exclusivebf_6m", "anybf_6m", "WAZ_6", "HAZ_6")
+
+include_vars_1y <- c("treat", "hamd_baseline", "hamd_baseline2",
+                     "hamd_6m", "hamd_6m2", "hamd_6m_percentchange_6m", "hamd_1y", "hamd_1y2", "hamd_1y_percentchange_1y", "hamd_1y_percentchange_prev_1y", "bdq_baseline", "bdq_6m", 
+                     "bdq_1y", "gaf_baseline", "gaf_6m", "gaf_1y", "mo_ht_baseline", "mo_wt_6m", "mo_bmi_baseline", "ses_baseline", 
+                     "ses_6m", "ses_1y",  "age_baseline", "edu_mo_baseline", 
+                     "edu_fa_baseline", "employed_fa_baseline", "occupation_fa_baseline", 
+                     "electricity_baseline", "radio_baseline", "tv_baseline", 
+                     "fridge_baseline", "bicycle_baseline", "motorcycle_baseline", 
+                     "aircon_baseline", "waterpump_baseline", "cartruck_baseline", 
+                     "pipedwater_baseline", "wellwithpump_baseline", "wellwater_baseline", 
+                     "flushtoilet_baseline", "anylatrine_baseline", "brickwalls_baseline", 
+                     "enoughfoodmoney_baseline", "metalroof_baseline", 
+                     "wealth_baseline", "ln_income_fa_6m", "ln_income_fa_1y", "basicneeds_baseline", 
+                     "enoughfood_baseline", "employed_mo_baseline", "empowered_6m", 
+                     "motherfinancial_baseline", "mspss_baseline", "mspss_6m", "mspss_1y", 
+                     "grandmother_baseline", "grandmother_6m", "grandmother_1y", "famstruct_baseline", "maritalscale_1y", "nonviolent_1y", 
+                     "relationship_husb_1y", "relationship_inlaw_1y",
+                     "no_kids_baseline", "c_first_child_baseline", "girl_baseline", 
+                     "femshare_baseline", "exclusivebf_6m", "anybf_6m", "WAZ_6", "WAZ_1y", 
+                     "HAZ_6", "HAZ_1y", "play_mo_1y", "play_fa_1y")
+
+include_vars_7y <- c("treat", "hamd_baseline",  "hamd_baseline2", "hamd_6m", "hamd_6m2", "hamd_6m_percentchange_6m", "hamd_1y", "hamd_1y2", "hamd_1y_percentchange_1y", "hamd_1y_percentchange_prev_1y", "bdq_baseline", "bdq_6m", 
+                     "bdq_1y", "gaf_baseline", "gaf_6m", "gaf_1y", "mo_ht_baseline", "mo_bmi_baseline", "mo_wt_6m", "ses_baseline", 
+                     "ses_6m", "ses_1y", "age_baseline", "edu_mo_baseline", "edu_fa_baseline", 
+                     "employed_fa_baseline", "occupation_fa_baseline", "electricity_baseline", 
+                     "radio_baseline", "tv_baseline", "fridge_baseline", "bicycle_baseline", 
+                     "motorcycle_baseline", "aircon_baseline", "waterpump_baseline", 
+                     "cartruck_baseline", "pipedwater_baseline", "wellwithpump_baseline", 
+                     "wellwater_baseline", "flushtoilet_baseline", "anylatrine_baseline", 
+                     "brickwalls_baseline", "enoughfoodmoney_baseline", "metalroof_baseline", 
+                     "wealth_baseline", "ln_income_fa_6m", 
+                     "ln_income_fa_1y", "basicneeds_baseline", "enoughfood_baseline", 
+                     "employed_mo_baseline", "empowered_6m", 
+                     "motherfinancial_baseline", "mspss_baseline", "mspss_6m", 
+                     "mspss_1y", "grandmother_baseline", "grandmother_6m", "grandmother_1y", 
+                     "famstruct_baseline", "maritalscale_1y", "nonviolent_1y", 
+                     "relationship_husb_1y", "relationship_inlaw_1y", "no_kids_baseline", 
+                     "c_first_child_baseline", "girl_baseline", "femshare_baseline", 
+                     "exclusivebf_6m", "anybf_6m", "WAZ_6", "WAZ_1y", 
+                     "HAZ_6", "HAZ_1y", "play_mo_1y", "play_fa_1y")
+
+
+
+# Create tbl_summary objects (one overall summary per timepoint)
+tbl_6m <- dat_trial_clean %>% 
+  #filter(attrit == 0 | attrit == 1) %>% ## Filter to 6 months
+  filter(!is.na(remission_6mo)) %>%
+  tbl_summary(
+    by = remission_6mo,
+    include = include_vars_6m,
+    type = list(hamd_6m ~ "continuous",
+                hamd_6m2 ~ "continuous",
+                hamd_6m_percentchange_6m ~ "continuous",
+                no_kids_baseline ~ "continuous",
+                HAZ_6 ~ "continuous"),
+    missing = "ifany",
+    percent = "column",
+    statistic = list(all_continuous() ~ "{mean} ({sd}) | {median} ({p25}, {p75})",
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+    digits = list(
+      all_categorical() ~ c(0, 0),
+      all_continuous() ~ c(1, 1)
+  )
+  ) %>%
+  add_p(pvalue_fun  = function(x) style_pvalue(x, digits = 3)) %>%
+  bold_p(t = 0.05) %>%
+  bold_labels() 
+
+
+tbl_1y <- dat_trial_clean %>% 
+  #filter(attrit == 0 | attrit == 1) %>% # Filter to 1 year
+  filter(!is.na(relapse_1y)) %>%
+  tbl_summary(
+    by = relapse_1y,
+    include = include_vars_1y,
+    type = list(hamd_6m ~ "continuous",
+                hamd_6m2 ~ "continuous",
+                hamd_6m_percentchange_6m ~ "continuous",
+                no_kids_baseline ~ "continuous",
+                bdq_1y ~ "continuous",
+                HAZ_6 ~ "continuous",
+                HAZ_1y ~ "continuous",
+                hamd_1y_percentchange_1y ~ "continuous",
+                hamd_1y_percentchange_prev_1y ~ "continuous",
+                relationship_husb_1y ~ "continuous",
+                relationship_inlaw_1y ~ "continuous",
+                play_mo_1y ~ "continuous",
+                play_fa_1y ~ "continuous"),
+    missing = "ifany",
+    percent = "column",
+    statistic = list(all_continuous() ~ "{mean} ({sd}) | {median} ({p25}, {p75})",
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+    digits = list(
+      all_categorical() ~ c(0, 0),
+      all_continuous() ~ c(1, 1)
+  )
+  ) %>%
+  add_p(pvalue_fun  = function(x) style_pvalue(x, digits = 3)) %>%
+  bold_p(t = 0.05) %>%
+  bold_labels() 
+
+
+tbl_7y <- dat_trial_clean %>% 
+  #filter(attrit2 == 0 & attrit == 0) %>% # Filter to 7 years
+  filter(!is.na(recurrence_7y)) %>%
+  tbl_summary(
+    by = recurrence_7y,
+    include = include_vars_7y,
+    type = list(hamd_6m ~ "continuous",
+                hamd_6m2 ~ "continuous",
+                hamd_6m_percentchange_6m ~ "continuous",
+                no_kids_baseline ~ "continuous",
+                bdq_1y ~ "continuous",
+                HAZ_6 ~ "continuous",
+                HAZ_1y ~ "continuous",
+                hamd_1y_percentchange_1y ~ "continuous",
+                hamd_1y_percentchange_prev_1y ~ "continuous",
+                relationship_husb_1y ~ "continuous",
+                relationship_inlaw_1y ~ "continuous",
+                play_mo_1y ~ "continuous",
+                play_fa_1y ~ "continuous"),
+    missing = "ifany",
+    percent = "column",
+    statistic = list(all_continuous() ~ "{mean} ({sd}) | {median} ({p25}, {p75})",
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+    digits = list(
+      all_categorical() ~ c(0, 0),
+      all_continuous() ~ c(1, 1)
+  )
+  ) %>%
+  add_p(pvalue_fun  = function(x) style_pvalue(x, digits = 3)) %>%
+  bold_p(t = 0.05) %>%
+  bold_labels() 
+
+# Merge the summary tables side-by-side
+merged_tbl <- tbl_merge(
+  list(tbl_6m, tbl_1y, tbl_7y),
+  tab_spanner = c("Remission at 6 months", "Relapse at 1 year", "Recurrence at 7 years")
+)
+
+merged_tbl
+# Convert to flextable for further formatting and export
+merged_tbl_flex <- as_flex_table(merged_tbl) %>%
+  theme_vanilla() %>%
+  autofit() %>%
+  fontsize(size = 10, part = "all") %>%
+  set_caption("Merged Summary Table by Timepoint (Horizontal Format)")
+
+# Save to a Word document
+save_as_docx(merged_tbl_flex, path = "outputs/merged_summary_horizontal.docx")
+
+# Optionally, view the flextable in RStudio
+merged_tbl_flex
+
+```
+
+
+# ─────────────────────────────────────────────
+# Section 3: Subset data for ML
+# ─────────────────────────────────────────────
+
+### Relapse at one year
+```{r}
+
+#### Remove predictors assessed at one and seven years
+dat_ml_1y <- dat_trial_clean %>%
+  #filter(attrit == 0 | attrit == 1) %>% # Filter to 1 year
+  filter(!is.na(relapse_1y)) %>% #### Drop NA outcome
+  dplyr::select(c(treat, newid, uc, interviewer, month_int,
+remission_6mo, hamd_6m_percentchange_6m, response_6mo, relapse_1y, depindex_0, depindex_6m, depindex_6m_f, depressed_6m, depindex_0, depindex_0_f, depindex_6m, mo_ht_baseline, mo_wt_6m, mo_bmi_baseline, hamd_baseline, hamd_6m, bdq_baseline, bdq_6m, gaf_baseline, gaf_6m,  ses_baseline, ses_6m, age_baseline, edu_mo_baseline, edu_fa_baseline, employed_fa_baseline, occupation_fa_baseline, electricity_baseline, radio_baseline, tv_baseline, fridge_baseline, bicycle_baseline, motorcycle_baseline, aircon_baseline, waterpump_baseline, cartruck_baseline, pipedwater_baseline, wellwithpump_baseline, wellwater_baseline, flushtoilet_baseline, anylatrine_baseline, brickwalls_baseline, enoughfoodmoney_baseline, metalroof_baseline, wealth_baseline, ln_income_fa_6m, basicneeds_baseline, enoughfood_baseline, employed_mo_baseline,  empowered_6m, motherfinancial_baseline, mspss_baseline, mspss_6m, grandmother_baseline, grandmother_6m, famstruct_baseline,  no_kids_baseline, c_first_child_baseline, girl_baseline, femshare_baseline, exclusivebf_6m, anybf_6m, WAZ_6, HAZ_6))
+
+# Identify variables with haven labels
+problematic_vars <- sapply(dat_ml_1y, is.labelled)
+print(names(dat_ml_1y)[problematic_vars])
+
+# Function to convert selected variables to numeric
+convert_to_numeric <- function(data, var_list) {
+  data <- data %>% mutate(across(all_of(var_list), ~ as.numeric(as.character(haven::zap_labels(.)))))
+  return(data)
+}
+
+# List of variables to convert
+#numeric_vars <- c("grandmother_1y")
+
+# Apply conversion
+#dat_ml_1y <- convert_to_numeric(dat_ml_1y, numeric_vars)
+#str(dat_ml_1y[numeric_vars])
+
+
+# Convert matrix cols to vector
+matrix_columns <- names(dat_ml_1y)[sapply(dat_ml_1y, is.matrix)]
+print(matrix_columns)
+
+dat_ml_1y <- dat_ml_1y %>%
+  mutate(across(all_of(matrix_columns), ~ as.numeric(.)))
+
+## Export non-imputed dataset
+write_csv(dat_ml_1y, "dat_ml_1y.csv")
+dat_ml_1y <- read_csv("dat_ml_1y.csv")
+
+```
+
+
+### Recurrence at 7 years
+```{r}
+
+dat_ml_7y <- dat_trial_clean %>%
+  #filter(attrit2 == 0 & attrit == 0) %>% # Filter to 7 years
+  filter(!is.na(recurrence_7y)) %>% #### Drop NA outcome
+  dplyr::select(c(treat, newid, uc, interviewer, month_int, recurrence_7y, remission_1y, 
+remission_6mo, hamd_6m_percentchange_6m, hamd_1y_percentchange_1y, hamd_1y_percentchange_prev_1y, response_6mo, response_1y, recovery_1y, depindex_0, depindex_6m, depindex_1y, depindex_6m_f, depressed_6m, depressed_1y, depindex_0, depindex_0_f, depindex_6m, depindex_1y_f, mo_ht_baseline, mo_bmi_baseline, mo_wt_6m, hamd_baseline, hamd_6m, hamd_1y, bdq_baseline, bdq_6m, bdq_1y, gaf_baseline, gaf_6m, gaf_1y,  ses_baseline, ses_6m, ses_1y, edu_mo_baseline, edu_fa_baseline, employed_fa_baseline, occupation_fa_baseline, electricity_baseline, radio_baseline, tv_baseline, fridge_baseline, bicycle_baseline, motorcycle_baseline, aircon_baseline, waterpump_baseline, cartruck_baseline, pipedwater_baseline, wellwithpump_baseline, wellwater_baseline, flushtoilet_baseline, anylatrine_baseline, brickwalls_baseline, enoughfoodmoney_baseline, metalroof_baseline, wealth_baseline, ln_income_fa_6m, ln_income_fa_1y, basicneeds_baseline, enoughfood_baseline,  employed_mo_baseline, empowered_6m, mspss_baseline, mspss_6m, mspss_1y,  grandmother_baseline, grandmother_6m, grandmother_1y,  famstruct_baseline, maritalscale_1y, nonviolent_1y,  relationship_husb_1y,  relationship_inlaw_1y, no_kids_baseline, c_first_child_baseline, girl_baseline, femshare_baseline, exclusivebf_6m, anybf_6m, WAZ_6, WAZ_1y, HAZ_6, HAZ_1y, play_mo_1y, play_fa_1y))
+
+# Identify variables with haven labels
+problematic_vars <- sapply(dat_ml_7y, is.labelled)
+print(names(dat_ml_7y)[problematic_vars])
+
+# Function to convert selected variables to numeric
+convert_to_numeric <- function(data, var_list) {
+  data <- data %>% mutate(across(all_of(var_list), ~ as.numeric(as.character(haven::zap_labels(.)))))
+  return(data)
+}
+
+# List of variables to convert
+#numeric_vars <- c("grandmother_7y", "genhealth_7y", "income_hh_7y", "income_mo_7y")
+
+# Apply conversion
+#dat_ml_7y <- convert_to_numeric(dat_ml_7y, numeric_vars)
+#str(dat_ml_7y[numeric_vars])
+
+
+# Convert matrix cols to vector
+matrix_columns <- names(dat_ml_7y)[sapply(dat_ml_7y, is.matrix)]
+print(matrix_columns)
+
+dat_ml_7y <- dat_ml_7y %>%
+  mutate(across(all_of(matrix_columns), ~ as.numeric(.)))
+
+## Export non-imputed dataset
+write_csv(dat_ml_7y, "dat_ml_7y.csv")
+dat_ml_7y <- read_csv("dat_ml_7y.csv")
+
+
+```
+
+
+
+### Remission at 6 months
+```{r}
+
+#### Remove predictors assessed at 6 months, 1 year, and  years
+dat_ml_6m <- dat_trial_clean %>%
+  #filter(attrit == 0 | attrit == 1) %>% # Filter to 6 months
+  filter(!is.na(remission_6mo)) %>% #### Drop NA outcome
+  dplyr::select(c(treat, newid, uc, interviewer, month_int, remission_6mo, depindex_0, depindex_0_f, mo_ht_baseline, mo_bmi_baseline, hamd_baseline, bdq_baseline, gaf_baseline, ses_baseline, age_baseline, edu_mo_baseline, edu_fa_baseline, employed_fa_baseline, occupation_fa_baseline, electricity_baseline, radio_baseline, tv_baseline, fridge_baseline, bicycle_baseline, motorcycle_baseline, aircon_baseline, waterpump_baseline, cartruck_baseline, pipedwater_baseline, wellwithpump_baseline, wellwater_baseline, flushtoilet_baseline, anylatrine_baseline, brickwalls_baseline, enoughfoodmoney_baseline, metalroof_baseline, wealth_baseline, basicneeds_baseline, enoughfood_baseline, employed_mo_baseline, mspss_baseline, grandmother_baseline, famstruct_baseline, no_kids_baseline, c_first_child_baseline, girl_baseline, femshare_baseline)) #%>%
+  #drop_na()  
+
+# Identify variables with haven labels
+problematic_vars <- sapply(dat_ml_6m, is.labelled)
+print(names(dat_ml_6m)[problematic_vars])
+
+# Function to convert selected variables to numeric
+convert_to_numeric <- function(data, var_list) {
+  data <- data %>% mutate(across(all_of(var_list), ~ as.numeric(as.character(haven::zap_labels(.)))))
+  return(data)
+}
+
+# List of variables to convert
+#numeric_vars <- c("grandmother_6m")
+
+# Apply conversion
+#dat_ml_6m <- convert_to_numeric(dat_ml_6m, numeric_vars)
+#str(dat_ml_6m[numeric_vars])
+
+
+# Convert matrix cols to vector
+matrix_columns <- names(dat_ml_6m)[sapply(dat_ml_6m, is.matrix)]
+print(matrix_columns)
+
+dat_ml_6m <- dat_ml_6m %>%
+  mutate(across(all_of(matrix_columns), ~ as.numeric(.)))
+
+
+## Export non-imputed dataset
+write_csv(dat_ml_6m, "dat_ml_6m.csv")
+dat_ml_6m <- read_csv("dat_ml_6m.csv")
+
+```
+
+### Depressed at 7 years
+```{r}
+
+dat_ml_7y_dep <- dat_trial_clean %>%
+  #filter(attrit2 == 0 & attrit == 0) %>% # Filter to 7 years
+  filter(!is.na(depressed_7y)) %>% #### Drop NA outcome
+  dplyr::select(c(treat, newid, uc, interviewer, month_int, depressed_7y, recurrence_7y, remission_1y, 
+remission_6mo, hamd_6m_percentchange_6m, hamd_1y_percentchange_1y, hamd_1y_percentchange_prev_1y, response_6mo, response_1y, recovery_1y, depindex_0, depindex_6m, depindex_1y, depindex_6m_f, depressed_6m, depressed_1y, depindex_0, depindex_0_f, depindex_6m, depindex_1y_f, mo_ht_baseline, mo_bmi_baseline, mo_wt_6m, hamd_baseline, hamd_6m, hamd_1y, bdq_baseline, bdq_6m, bdq_1y, gaf_baseline, gaf_6m, gaf_1y,  ses_baseline, ses_6m, ses_1y, edu_mo_baseline, edu_fa_baseline, employed_fa_baseline, occupation_fa_baseline, electricity_baseline, radio_baseline, tv_baseline, fridge_baseline, bicycle_baseline, motorcycle_baseline, aircon_baseline, waterpump_baseline, cartruck_baseline, pipedwater_baseline, wellwithpump_baseline, wellwater_baseline, flushtoilet_baseline, anylatrine_baseline, brickwalls_baseline, enoughfoodmoney_baseline, metalroof_baseline, wealth_baseline, ln_income_fa_6m, ln_income_fa_1y, basicneeds_baseline, enoughfood_baseline,  employed_mo_baseline, empowered_6m, mspss_baseline, mspss_6m, mspss_1y,  grandmother_baseline, grandmother_6m, grandmother_1y,  famstruct_baseline, maritalscale_1y, nonviolent_1y,  relationship_husb_1y,  relationship_inlaw_1y, no_kids_baseline, c_first_child_baseline, girl_baseline, femshare_baseline, exclusivebf_6m, anybf_6m, WAZ_6, WAZ_1y, HAZ_6, HAZ_1y, play_mo_1y, play_fa_1y)) 
+
+# Identify variables with haven labels
+problematic_vars <- sapply(dat_ml_7y_dep, is.labelled)
+print(names(dat_ml_7y_dep)[problematic_vars])
+
+# Function to convert selected variables to numeric
+convert_to_numeric <- function(data, var_list) {
+  data <- data %>% mutate(across(all_of(var_list), ~ as.numeric(as.character(haven::zap_labels(.)))))
+  return(data)
+}
+
+# List of variables to convert
+#numeric_vars <- c("grandmother_7y", "genhealth_7y", "income_hh_7y", "income_mo_7y")
+
+# Apply conversion
+#dat_ml_7y_dep <- convert_to_numeric(dat_ml_7y_dep, numeric_vars)
+#str(dat_ml_7y_dep[numeric_vars])
+
+
+# Convert matrix cols to vector
+matrix_columns <- names(dat_ml_7y_dep)[sapply(dat_ml_7y_dep, is.matrix)]
+print(matrix_columns)
+
+dat_ml_7y_dep <- dat_ml_7y_dep %>%
+  mutate(across(all_of(matrix_columns), ~ as.numeric(.)))
+
+## Export non-imputed dataset
+write_csv(dat_ml_7y_dep, "dat_ml_7y_dep.csv")
+dat_ml_7y_dep <- read_csv("dat_ml_7y_dep.csv")
+
+```
+
+### Never recovered at 7 years
+```{r}
+
+dat_ml_7y_never <- dat_trial_clean %>%
+  #filter(attrit2 == 0 & attrit == 0) %>% # Filter to 7 years
+  filter(!is.na(recover_never)) %>% #### Drop NA outcome
+  dplyr::select(c(treat, newid, uc, interviewer, month_int, recover_never, recurrence_7y, remission_1y, 
+remission_6mo, hamd_6m_percentchange_6m, hamd_1y_percentchange_1y, hamd_1y_percentchange_prev_1y, response_6mo, response_1y, recovery_1y, depindex_0, depindex_6m, depindex_1y, depindex_6m_f, depressed_6m, depressed_1y, depindex_0, depindex_0_f, depindex_6m, depindex_1y_f, mo_ht_baseline, mo_bmi_baseline, mo_wt_6m, hamd_baseline, hamd_6m, hamd_1y, bdq_baseline, bdq_6m, bdq_1y, gaf_baseline, gaf_6m, gaf_1y,  ses_baseline, ses_6m, ses_1y, edu_mo_baseline, edu_fa_baseline, employed_fa_baseline, occupation_fa_baseline, electricity_baseline, radio_baseline, tv_baseline, fridge_baseline, bicycle_baseline, motorcycle_baseline, aircon_baseline, waterpump_baseline, cartruck_baseline, pipedwater_baseline, wellwithpump_baseline, wellwater_baseline, flushtoilet_baseline, anylatrine_baseline, brickwalls_baseline, enoughfoodmoney_baseline, metalroof_baseline, wealth_baseline, ln_income_fa_6m, ln_income_fa_1y, basicneeds_baseline, enoughfood_baseline,  employed_mo_baseline, empowered_6m, mspss_baseline, mspss_6m, mspss_1y,  grandmother_baseline, grandmother_6m, grandmother_1y,  famstruct_baseline, maritalscale_1y, nonviolent_1y,  relationship_husb_1y,  relationship_inlaw_1y, no_kids_baseline, c_first_child_baseline, girl_baseline, femshare_baseline, exclusivebf_6m, anybf_6m, WAZ_6, WAZ_1y, HAZ_6, HAZ_1y, play_mo_1y, play_fa_1y)) 
+
+# Identify variables with haven labels
+problematic_vars <- sapply(dat_ml_7y_never, is.labelled)
+print(names(dat_ml_7y_never)[problematic_vars])
+
+# Function to convert selected variables to numeric
+convert_to_numeric <- function(data, var_list) {
+  data <- data %>% mutate(across(all_of(var_list), ~ as.numeric(as.character(haven::zap_labels(.)))))
+  return(data)
+}
+
+# List of variables to convert
+#numeric_vars <- c("grandmother_7y", "genhealth_7y", "income_hh_7y", "income_mo_7y")
+
+# Apply conversion
+#dat_ml_7y_never <- convert_to_numeric(dat_ml_7y_never, numeric_vars)
+#str(dat_ml_7y_never[numeric_vars])
+
+
+# Convert matrix cols to vector
+matrix_columns <- names(dat_ml_7y_never)[sapply(dat_ml_7y_never, is.matrix)]
+print(matrix_columns)
+
+dat_ml_7y_never <- dat_ml_7y_never %>%
+  mutate(across(all_of(matrix_columns), ~ as.numeric(.)))
+
+## Export non-imputed dataset
+write_csv(dat_ml_7y_never, "dat_ml_7y_never.csv")
+dat_ml_7y_never <- read_csv("dat_ml_7y_never.csv")
+
+```
+
+
+## Diagram of depression trajectories
+```{r}
+
+# install.packages(c("ggplot2","grid"))
+library(grid)
+
+# ── 1) Main “successful” trajectory (solid) ────────────────────────────────
+main <- data.frame(
+  time     = c(0,  3,   6,   36,  84),
+  severity = c(20, 10,   5,    5,   5)
+)
+
+# 2) Landmark events on the main path
+landmarks <- data.frame(
+  time     = c( 3,   6,   36),
+  severity = c(10,   5,    5),
+  label    = c("Response", "Remission", "Recovery"),
+  shape    = 4
+)
+
+# 3) Relapse arc (dashed) from Remission → Relapse
+relapse_arc <- data.frame(
+  x    = 6,    y    = 5,
+  xend = 12,   yend = 18
+)
+relapse_pt  <- data.frame(time=12, severity=18, label="Relapse", shape=1)
+
+# 4) Recurrence arc (dashed) from Recovery → Recurrence
+recurr_arc <- data.frame(
+  x    = 36,   y    = 5,
+  xend = 84,   yend = 17
+)
+recurr_pt  <- data.frame(time=84, severity=17, label="Recurrence", shape=1)
+
+# ── 5) Plot ────────────────────────────────────────────────────────────────
+# Compute the vertical limits (add a little padding)
+# before plotting
+y_min <- min(main$severity) * 0.95
+y_max <- max(main$severity) * 1.05
+
+ggplot() +
+  # 1) custom panel box
+  annotate("rect",
+           xmin = 0,   xmax = 90,
+           ymin = y_min, ymax = y_max,
+           fill  = NA,
+           color = "black",
+           size  = 1) +
+  
+  # 2) main trajectory
+  geom_line(data = main,
+            aes(time, severity),
+            size  = 1.5,
+            color = "#2c7fb8") +
+  
+  # 3) event markers
+  geom_point(data = landmarks,
+             aes(time, severity),
+             shape  = 4,
+             size   = 4,
+             stroke = 1.2) +
+  geom_text(data = landmarks,
+            aes(time, severity, label = label),
+            vjust = -1.2,
+            size  = 3) +
+  
+  # 4) relapse arc
+  geom_curve(data = relapse_arc,
+             aes(x = x, y = y, xend = xend, yend = yend),
+             curvature = 0.3,
+             linetype  = "dashed",
+             color     = "gray40") +
+  geom_point(data = relapse_pt,
+             aes(time, severity),
+             shape  = 1,
+             size   = 4,
+             stroke = 1.2) +
+  geom_text(data = relapse_pt,
+            aes(time, severity, label = label),
+            vjust = -1.2,
+            size  = 3) +
+  
+  # 5) recurrence arc
+  geom_curve(data = recurr_arc,
+             aes(x = x, y = y, xend = xend, yend = yend),
+             curvature = 0.3,
+             linetype  = "dashed",
+             color     = "gray40") +
+  geom_point(data = recurr_pt,
+             aes(time, severity),
+             shape  = 1,
+             size   = 4,
+             stroke = 1.2) +
+  geom_text(data = recurr_pt,
+            aes(time, severity, label = label),
+            vjust = -1.2,
+            size  = 3) +
+  
+  # 6) MDD threshold line + label
+  geom_hline(yintercept = 7,
+             linetype    = "dashed",
+             color       = "firebrick",
+             size        = 0.8) +
+  annotate("text",
+           x     = 5,
+           y     = 8,
+           label = "Threshold for\nMDD diagnosis",
+           color = "firebrick",
+           size  = 3,
+           hjust = 0) +
+  
+  # 7) axes
+  scale_x_continuous(
+    name   = "Time since baseline",
+    breaks = c(6, 12, 84),
+    labels = c("6 mo", "1 yr", "7 yr"),
+    limits = c(0, 90),
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(
+    name   = "Depression severity\n(higher = more severe)",
+    breaks = NULL,
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  
+  coord_cartesian(clip = "off") +
+  
+  # 8) theme
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid.major   = element_blank(),
+    panel.grid.minor   = element_blank(),
+    axis.title.x       = element_blank(),
+    axis.title.y       = element_text(face = "bold", margin = margin(r = 10)),
+    axis.text.x        = element_text(color = "black"),
+    axis.ticks.length  = unit(3, "pt"),
+    legend.position    = "right",
+    legend.title       = element_blank(),
+    legend.text        = element_text(size = 12),
+    plot.margin        = margin(10, 10, 10, 10)
+  )
+
+```
+
